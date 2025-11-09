@@ -75,7 +75,7 @@ jobs:
         run: |
           ENVIRONMENT="${{ steps.env.outputs.env }}"
           FILE="overlays/${ENVIRONMENT}/kustomization.yaml"
-          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/my-app"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/my-app"
           TAG="${{ needs.build-and-push.outputs.image_tag }}"
 
           echo "Updating $FILE with tag $TAG"
