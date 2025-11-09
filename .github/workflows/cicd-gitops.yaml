@@ -1,0 +1,91 @@
+name: CI-CD GitOps (branch-aware)
+
+on:
+  push:
+    branches:
+      - dev
+      - staging
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          TAG=${GITHUB_SHA::7}
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/my-app:${{ steps.meta.outputs.image_tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/my-app:latest
+
+  update-gitops:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: tegar97/k8s-argocd
+          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
+
+      - name: Install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+
+      - name: Determine env from branch
+        id: env
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          # default ke dev biar gak error
+          ENV="dev"
+          if [ "$BRANCH" = "dev" ]; then
+            ENV="dev"
+          elif [ "$BRANCH" = "staging" ]; then
+            ENV="staging"
+          elif [ "$BRANCH" = "main" ]; then
+            ENV="prod"
+          fi
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+
+      - name: Update kustomization for that env
+        run: |
+          ENVIRONMENT="${{ steps.env.outputs.env }}"
+          FILE="apps/overlays/${ENVIRONMENT}/kustomization.yaml"
+          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/service-auth"
+          TAG="${{ needs.build-and-push.outputs.image_tag }}"
+
+          echo "Updating $FILE with tag $TAG"
+          yq -i "(.images[] | select(.name == \"${IMAGE}\").newTag) = \"${TAG}\"" "$FILE"
+          cat "$FILE"
+
+      - name: Commit and push
+        run: |
+          ENVIRONMENT="${{ steps.env.outputs.env }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: update service-auth (${ENVIRONMENT}) to ${{ needs.build-and-push.outputs.image_tag }}" || echo "no changes"
+          git push
